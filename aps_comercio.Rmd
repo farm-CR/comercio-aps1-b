@@ -1,0 +1,329 @@
+---
+title: "APS Comércio"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(haven)
+library(readxl)
+```
+
+3.
+```{r}
+# Ler a base
+itpd <- read_dta("itpd.dta")
+```
+
+a)
+```{r}
+# Remover comércio doméstico e deixar a trade em bilhões
+itpd <- itpd %>% 
+  filter(exporter_iso3 != importer_iso3) %>% 
+  mutate(trade = trade / 1000)
+
+# Exportações totais por indústria por país
+itpd <- itpd %>% 
+  group_by(exporter_iso3, industry_id) %>% 
+  mutate(export_industry = sum(trade)) %>% 
+  ungroup()
+```
+
+b)
+```{r}
+
+itpd <- itpd %>% 
+  group_by(exporter_iso3, year) %>% 
+  mutate(total_export_country = sum(trade)) %>% # Exportações totais por ano por país
+  group_by(exporter_iso3, year, industry_id) %>% 
+  mutate(advantage = sum(trade) / total_export_country) # Vantagem absoluta por indústria por país por ano
+```
+
+c)
+```{r}
+itpd <- itpd %>% 
+  group_by(year) %>% 
+  mutate(total_export_year = sum(trade)) %>% # Exportações totais por ano
+  group_by(year, industry_id) %>% 
+  mutate(total_export_year_industry = sum(trade)) %>% # Exportações totais por ano por indústria
+  ungroup() %>% 
+  mutate(rca = advantage / (total_export_year_industry / total_export_year)) # RCA por indústria por país por ano
+```
+
+d)
+```{r}
+countries <- c("ARG", "BRA", "CHL", "VEN", "PRY", "URY", "COL", "BOL", "PER", "ECU")
+
+theme_set(theme_minimal())
+
+# Função para fazer gráficos das top 10 indústrias de cada um dos países em diferentes anos
+top_industries <- function(x) {
+  itpd %>%
+    select(exporter_iso3, industry_id, rca, year) %>%
+    filter(year == x & exporter_iso3 %in% countries)  %>%
+    distinct() %>%
+    group_by(exporter_iso3) %>%
+    arrange(desc(rca)) %>%
+    slice_head(n = 10) %>%
+    ungroup() %>%
+    split(.$exporter_iso3) %>%
+    lapply(function(df) {
+      ggplot(df, aes(x = reorder(factor(industry_id), rca), y = rca, 
+                   fill = reorder(factor(industry_id), rca))) +
+        geom_bar(stat = "identity") +
+        coord_flip() +
+        labs(
+        y = "RCA",
+        x = "Indústria",
+        fill = "Industry ID",
+        title = paste("Top 10 indústrias por RCA para", unique(df$exporter_iso3), "em", x)
+        ) +
+        theme(legend.position="none")
+  })
+}
+
+top_industries(2016)
+top_industries(2000)
+top_industries(2010)
+```
+
+4.
+b)
+```{r}
+# Ler a base PWT
+pwt <- read_excel("pwt1001.xlsx", sheet = 3)
+
+# Selecionar colunas e anos de interesse
+pwt <- pwt %>% 
+  select(countrycode, year, hc, cn, rnna) %>% 
+  filter(year > 1999)
+```
+
+c)
+```{r}
+# Ler a base WDI
+wdi <- read_csv("wdi.csv", show_col_types = FALSE)
+
+# Deixar a base no formato tidy apenas com área agricultural
+wdi_data <- wdi %>% 
+  filter(indicatorcode == "AG.LND.AGRI.K2") %>% 
+  pivot_longer(cols = v1960:v2020, names_to = "year", values_to = "ag_lnd") %>% 
+  mutate(year = as.numeric(str_extract(year, "\\d+"))) %>% 
+  filter(year > 1999) %>% 
+  reframe(countrycode, year, ag_lnd)
+```
+
+d)
+```{r}
+# Selecionar as variáveis de interesse da base ITPD
+itpd_data <- itpd %>%
+  select(exporter_iso3, year, industry_id, broad_sector, rca) %>% 
+  distinct() %>% 
+  rename("countrycode" = "exporter_iso3")
+
+# Juntar as bases
+data <- left_join(itpd_data, wdi_data, by = (c("countrycode", "year")))
+data <- left_join(data, pwt, by = (c("countrycode", "year")))
+```
+
+e)
+```{r}
+category_map <- c("Agricultura", "Mineração e energia", "Manufatura", "Serviços")
+
+# Fazer fator do setor com o nome de cada
+data$broad_sector <- as_factor(factor(data$broad_sector, labels = category_map))
+
+# Deixar apenas o ano de 2016
+data_2016 <- data %>% 
+  filter(year == 2016)
+
+# Função para fazer binned scatter plot de cada setor
+scatter <- function(col, title) {
+  ggplot(data_2016, aes(x = !!enquo(col), y = log(rca))) + 
+  geom_bin2d(bins=20) +
+  stat_smooth(method = "lm",
+              formula = y ~ x,
+              geom = "smooth", 
+              color = "red", 
+              fill = "coral") +
+  labs(x = title, y = "Log do RCA") +  
+  guides(fill=guide_legend(title="Observações")) +
+  facet_wrap(~broad_sector)
+}
+
+scatter(ag_lnd, "Área de terras agrícolas")
+scatter(cn, "Estoque de capital")
+scatter(hc, "Estoque de capital humano")
+```
+
+5.
+a) b) c) d) e)
+```{r}
+# Ler a base WDICountry e selecionar a renda
+wdi_data <- read_xlsx("WDICountry.xlsx") %>% 
+  rename("countrycode" = "Code", 
+         "income" = "Income group") %>% 
+  select(countrycode, income)
+
+data <- itpd %>%
+  filter(year == 2016) %>% # Deixar apenas o ano de 2016
+  select(exporter_iso3, importer_iso3, industry_id, broad_sector, trade) %>%
+  pivot_longer( # Deixar a base com apenas 1 país por observação
+    cols = c(exporter_iso3, importer_iso3),
+    names_to = "type",
+    values_to = "countrycode"
+  ) %>%
+  group_by(countrycode, type, industry_id) %>%
+  mutate(industry_trade = sum(trade)) %>% # Valor de importação e exportação por indústria por país
+  select(-trade) %>%
+  distinct() %>%
+  pivot_wider(names_from = type, values_from = industry_trade) %>% # Colocar o valor de importação e exportação em cada linha
+  left_join(wdi_data, by = "countrycode") %>% # Pegar a renda dos países
+  rename(
+    "export" = "exporter_iso3",
+    "import" = "importer_iso3"
+  ) %>%
+  group_by(countrycode, industry_id) %>%
+  mutate(gl = 1 - (abs(export - import) / (export + import))) %>% # Fazer o índice gl
+  ungroup() %>%
+  mutate(
+    service = fct_recode(as.factor(broad_sector), # Transformar setor em fator de serviço ou não
+      "Não-serviços" = "1", "Não-serviços" = "2",
+      "Não-serviços" = "3", "Serviços" = "4"
+    ),
+    income = fct_recode(as.factor(income), # Transformar renda em fator de alto ou não
+      "Renda não-alta" = "Low income", "Renda não-alta" = "Lower middle income",
+      "Renda alta" = "Upper middle income", "Renda alta" = "High income"
+    )
+  ) %>% 
+  drop_na(income, service)
+```
+
+f)
+```{r}
+bins_fd <- function(vec) {
+  as.integer(diff(range(vec, na.rm = T)) / (2 * IQR(vec, na.rm = T) / length(vec)^(1/3)))
+} # Função de freedman diaconis
+
+data %>% # Histograma por setor e renda
+  ggplot(aes(x = gl, y = ..density..)) +
+    geom_histogram(bins = bins_fd(data$gl), color = "white", fill = "blue") + 
+    labs(x = "Índice de Grubel and Lloyd", y = "Densidade") +
+    facet_grid(vars(income), vars(service))
+```
+
+6.
+a) b)
+```{r}
+eu_country_codes <- c(
+  "AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "EST", "FIN", "FRA", 
+  "DEU", "GRC", "HUN", "IRL", "ITA", "LVA", "LTU", "LUX", "MLT", "NLD", 
+  "POL", "PRT", "ROU", "SVK", "SVN", "ESP", "SWE"
+)
+
+# Selecionar nomes dos países
+wdi_data <- wdi %>% select(countryname, countrycode)
+
+data <- itpd %>% 
+  filter(year > 2009) %>% # 2010 em diante
+  select(exporter_iso3, importer_iso3, industry_id, trade) %>% 
+  pivot_longer( # Deixar a base com apenas 1 país por observação
+    cols = c(exporter_iso3, importer_iso3),
+    names_to = "type",
+    values_to = "countrycode"
+  ) %>% 
+  group_by(countrycode, type, industry_id) %>%
+  mutate(industry_trade = sum(trade)) %>% # Valor de importação e exportação por indústria por país
+  select(-trade) %>%
+  distinct() %>% 
+  pivot_wider(names_from = type, values_from = industry_trade) %>% # Colocar o valor de importação e exportação em cada linha
+  rename( 
+    "export" = "exporter_iso3",
+    "import" = "importer_iso3"
+  ) %>%
+  group_by(countrycode, industry_id) %>%
+  mutate(gl = 1 - (abs(export - import) / (export + import))) %>% # Índice gl de todos os países
+  left_join(wdi_data, by = "countrycode") %>% # Colocar os nomes dos países
+  distinct()
+
+data_eu <- data %>% # Base apenas da EU
+  filter(countrycode %in% eu_country_codes) 
+
+data_wine <- data_eu %>%  # Apenas indústria de vinho
+  filter(industry_id == 50)
+
+# Estatísticas descritivas
+print(summary(data_wine$gl)) 
+print(sd(data_wine$gl))
+
+# Boxplot do RCA do vinho
+data_wine %>% 
+  ggplot(aes(y = gl)) +
+    geom_boxplot(fill = "cyan") +
+    labs(y = "Índice de Grubel and Lloyd", x = "", 
+         title = "Boxplot para a indústria de vinho de países da União Européia") +
+  theme(axis.text.x=element_blank())
+
+# Gráfico de barras do RCA do vinho
+ggplot(data_wine, aes(x = reorder(factor(countryname), gl), gl, fill = reorder(factor(countryname), gl))) +
+  geom_bar(stat = "identity") +
+  coord_flip() + 
+  labs(y = "Índice de Grubel and Lloyd", x = "Países", 
+       title = "Indústria de vinho de países da União Européia") +
+  theme() +
+  theme(legend.position="none")
+```
+
+c)
+```{r}
+af_country_codes <- c(
+  "DZA", "AGO", "BEN", "BWA", "BFA", "BDI", "CMR", "CPV", "CAF", "TCD",
+  "COM", "COG", "CIV", "DJI", "EGY", "GNQ", "ERI", "SWZ", "ETH", "GAB",
+  "GMB", "GHA", "GIN", "GNB", "KEN", "LSO", "LBR", "LBY", "MDG", "MWI",
+  "MLI", "MRT", "MUS", "MAR", "MOZ", "NAM", "NER", "NGA", "RWA", "STP",
+  "SEN", "SYC", "SLE", "SOM", "ZAF", "SSD", "SDN", "TZA", "TGO", "TUN",
+  "UGA", "ZMB", "ZWE"
+)
+
+# Apenas países da África e EU e fator para se é EU ou não
+data_euaf <- data %>%
+  filter(countrycode %in% eu_country_codes | countrycode %in% af_country_codes) %>% 
+  mutate(eu = as.factor(ifelse(countrycode %in% eu_country_codes, "União Europeia", "África")))
+
+# Boxplot do RCA por região
+data_euaf %>% 
+  ggplot(aes(y = gl, fill = eu)) +
+    geom_boxplot() +
+    labs(y = "Índice de Grubel and Lloyd", x = "", 
+         title = "Boxplot para a o índice de Grubel and Lloyd") +
+    theme(legend.position="none") +
+    facet_wrap(~eu) +
+    theme(axis.text.x=element_blank())
+
+# Apenas países da África
+data_af <- data_euaf %>% filter(eu == "África")
+
+# Estatísticas descritivas
+print(summary(data_af$gl))
+print(sd(data_af$gl, na.rm = T))
+print(summary(data_eu$gl))
+print(sd(data_eu$gl, na.rm = T))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
